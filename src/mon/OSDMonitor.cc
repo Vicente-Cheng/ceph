@@ -3075,7 +3075,9 @@ bool OSDMonitor::preprocess_command(MonOpRequestRef op)
     cmd_getval(g_ceph_context, cmdmap, "format", format);
     boost::scoped_ptr<Formatter> f(Formatter::create(format, "json-pretty", "json-pretty"));
     f->open_object_section("osd_location");
-    f->dump_int("osd", osd);
+    f->dump_int("osd-id", osd);
+    f->dump_string("status IN/OUT", osdmap.is_in(osd) ? "IN" : "OUT");
+    f->dump_string("status UP/DOWN", osdmap.is_up(osd) ? "UP" : "DOWN");
     f->dump_stream("ip") << osdmap.get_addr(osd);
     f->open_object_section("crush_location");
     map<string,string> loc = osdmap.crush->get_full_location(osd);
