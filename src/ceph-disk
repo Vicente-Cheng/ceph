@@ -51,12 +51,21 @@ Activate:
  - if encrypted, map the dmcrypt volume
  - mount the volume in a temp location
  - allocate an osd id (if needed)
+ - if deactived, change the gpt partition type correctly
  - remount in the correct location /var/lib/ceph/osd/$cluster-$id
+ - remove the deactive flag
  - start ceph-osd
 
  - triggered by udev when it sees the OSD gpt partition type
  - triggered by admin 'ceph-disk activate <path>'
  - triggered on ceph service startup with 'ceph-disk activate-all'
+
+Deactivate:
+ - stop ceph-osd service if needed (If osd still in osd map, make it out first)
+ - remove 'ready', 'active', and INIT-specific files
+ - remove gpt partition type (prevent triggered by udev when system bootup)
+ - create deactive flag
+ - umount device and remove mount point
 
 We rely on /dev/disk/by-partuuid to find partitions by their UUID;
 this is what the journal symlink inside the osd data volume normally
@@ -80,6 +89,7 @@ knew the GPT partition type.
 
 CEPH_OSD_ONDISK_MAGIC = 'ceph osd volume v026'
 
+LINUX_RESERVED_TYPE =       '8da63339-0007-60c0-c436-083ac8230908'
 JOURNAL_UUID =              '45b0969e-9b03-4f30-b4c6-b4b80ceff106'
 MPATH_JOURNAL_UUID =        '45b0969e-8ae0-4982-bf9d-5a8d867af560'
 DMCRYPT_JOURNAL_UUID =      '45b0969e-9b03-4f30-b4c6-5ec00ceff106'
@@ -779,6 +789,24 @@ def check_osd_magic(path):
         raise BadMagicError(path)
     if magic != CEPH_OSD_ONDISK_MAGIC:
         raise BadMagicError(path)
+
+
+def convert_osd_id(cluster, osd_id):
+    """
+    Convert the OSD id to OS device (ex. sdx)
+    """
+    mountsp_name = '%s-%s' % (cluster, osd_id)
+    # mount_info's first fields means `device`, Second means `mount point`
+    mount_info = []
+    with file('/proc/mounts', 'rb') as proc_mounts:
+        for line in proc_mounts:
+            if mountsp_name in line:
+                fields = line.split()
+                mount_info.append(fields[0])
+                mount_info.append(fields[1])
+            else:
+                continue
+    return mount_info
 
 
 def check_osd_id(osd_id):
@@ -2101,6 +2129,68 @@ def start_daemon(
         raise Error('ceph osd start failed', e)
 
 
+def stop_daemon(
+    cluster,
+    osd_id,
+    ):
+    LOG.debug('Stoping %s osd.%s...', cluster, osd_id)
+
+    path = (STATEDIR + '/osd/{cluster}-{osd_id}').format(
+        cluster=cluster, osd_id=osd_id)
+
+    # upstart?
+    try:
+        if os.path.exists(os.path.join(path,'upstart')):
+            command_check_call(
+                [
+                    '/sbin/initctl',
+                    'stop',
+                    # I remove --no-wait parameter because we must guarantee
+                    # this service stop.
+                    'ceph-osd',
+                    'cluster={cluster}'.format(cluster=cluster),
+                    'id={osd_id}'.format(osd_id=osd_id),
+                    ],
+                )
+        elif os.path.exists(os.path.join(path, 'sysvinit')):
+            if os.path.exists('/usr/sbin/service'):
+                svc = '/usr/sbin/service'
+            else:
+                svc = '/sbin/service'
+            command_check_call(
+                [
+                    svc,
+                    'ceph',
+                    '--cluster',
+                    '{cluster}'.format(cluster=cluster),
+                    'stop',
+                    'osd.{osd_id}'.format(osd_id=osd_id),
+                    ],
+                )
+        elif os.path.exists(os.path.join(path, 'systemd')):
+            command_check_call(
+                [
+                    'systemctl',
+                    'disable',
+                    'ceph-osd@{osd_id}'.format(osd_id=osd_id),
+                    ],
+                )
+            command_check_call(
+                [
+                    'systemctl',
+                    'stop',
+                    'ceph-osd@{osd_id}'.format(osd_id=osd_id),
+                    ],
+                )
+        else:
+            raise Error('{cluster} osd.{osd_id} is not tagged with an init system'.format(
+                cluster=cluster,
+                osd_id=osd_id,
+            ))
+    except subprocess.CalledProcessError as e:
+        raise Error('ceph osd start failed', e)
+
+
 def detect_fstype(
     dev,
     ):
@@ -2184,6 +2274,31 @@ def mount_activate(
 
     path = mount(dev=dev, fstype=fstype, options=mount_options)
 
+    # check if the disk is deactive, change the journal owner, group
+    # mode for correct user and group.
+    if os.path.exists(os.path.join(path, 'deactive')):
+        # flag to activate a deactive osd.
+        deactive = True
+        journal_dev = os.path.realpath(os.path.join(path,'journal'))
+        try:
+            if get_ceph_user() == 'ceph':
+                command(
+                    [
+                    'chown', '-R', 'ceph:ceph',
+                    journal_dev,
+                    ],
+                )
+                command(
+                    [
+                    'chmod', '660',
+                    journal_dev,
+                    ]
+                )
+        except OSError:
+            pass
+    else:
+        deactive = False
+
     osd_id = None
     cluster = None
     try:
@@ -2217,6 +2332,29 @@ def mount_activate(
         elif other:
             raise Error('another %s osd.%s already mounted in position (old/different cluster instance?); unmounting ours.' % (cluster, osd_id))
         else:
+            # change the gpt partition type for bootup (meet the udev rules)
+            if deactive:
+                # Change OSD gpt partition type
+                if is_mpath(dev):
+                    type_code = MPATH_OSD_UUID
+                else:
+                    type_code = OSD_UUID
+                _change_gpt_partition_type(dev, type_code)
+
+                # Change Journal gpt partition type
+                if is_mpath(journal_dev):
+                    type_code = MPATH_JOURNAL_UUID
+                else:
+                    type_code = JOURNAL_UUID
+                _change_gpt_partition_type(journal_dev, type_code)
+
+                # Remove the deactive flag
+                try:
+                    os.remove(os.path.join(path, 'deactive'))
+                    LOG.info('Remove `deactive` file.')
+                except OSError:
+                    pass
+
             move_mount(
                 dev=dev,
                 path=path,
@@ -2451,6 +2589,152 @@ def main_activate(args):
     finally:
         activate_lock.release()  # noqa
 
+
+###########################
+
+def _mark_osd_out(cluster, osd_id):
+    try:
+        out, ret = command(
+                [
+                    'ceph',
+                    'osd',
+                    'out',
+                    'osd.%s' % osd_id,
+                    ],
+                )
+    except subprocess.CalledProcessError as e:
+        raise Error(e)
+
+
+def _check_osd_status(cluster, osd_id):
+    print "Checking osd id: %s ..." % osd_id
+    try:
+        out, ret = command(
+                [
+                    'ceph',
+                    'osd',
+                    'find',
+                    osd_id,
+                    '--cluster={cluster}'.format(
+                        cluster=cluster,
+                        ),
+                    '--format',
+                    'json',
+                    ],
+                )
+    except subprocess.CalledProcessError as e:
+        raise Error(e)
+    out_json = json.loads(out)
+    if out_json['status IN/OUT'] == u'IN':
+        LOG.info('Prepare to mark osd.%s out...', osd_id)
+        _mark_osd_out(cluster, osd_id)
+    else:
+        LOG.info('osd.%s is already out. Try to stop it...', osd_id)
+    if out_json['status UP/DOWN'] == u'UP':
+        stop_daemon(cluster, osd_id)
+    else:
+        return False
+    return True
+
+
+def _remove_osd_directory_files(mounted_path, cluster):
+    """
+    To remove the 'ready', 'active', INIT-specific files.
+    """
+    if os.path.exists(os.path.join(mounted_path, 'ready')):
+        try:
+            os.remove(os.path.join(mounted_path, 'ready'))
+            LOG.info('Remove `ready` file.')
+        except OSError:
+            pass
+    else:
+        LOG.info('`ready` file is already removed.')
+
+    if os.path.exists(os.path.join(mounted_path, 'active')):
+        try:
+            os.remove(os.path.join(mounted_path, 'active'))
+            LOG.info('Remove `active` file.')
+        except OSError:
+            pass
+    else:
+        LOG.info('`active` file is already removed.')
+
+    # Just check `upstart` and `sysvinit` directly if filename is init-spec.
+    conf_val = get_conf(
+        cluster=cluster,
+        variable='init'
+        )
+    if conf_val is not None:
+        init = conf_val
+    else:
+        init = init_get()
+    try:
+        os.remove(os.path.join(mounted_path, init))
+        LOG.info('Remove `%s` file.', init)
+        return
+    except OSError:
+        pass
+
+
+def _change_gpt_partition_type(device_part, type_code):
+    """
+    Due to udev rule 95-ceph-osd.rules, we need to remove the
+    gpt partition type to prevent trigger ceph-disk-activate.
+    """
+
+    ptype_linux_reserv = type_code
+
+    # using regular expression to find partition number
+    reg_expre = re.compile('\d')
+    part_num = device_part[reg_expre.search(device_part).span()[0]:]
+    device = device_part[:reg_expre.search(device_part).span()[0]]
+    try:
+        command_check_call(
+                    [
+                        'sgdisk',
+                        '--typecode=%s:%s' % (part_num, ptype_linux_reserv),
+                        '--',
+                        device,
+                    ],
+                )
+    except subprocess.CalledProcessError as e:
+        return Error(e)
+
+
+def main_deactivate(args):
+    if args.cluster is None:
+        args.cluster = 'ceph'
+    # Do not do anything if osd is already down.
+    if not _check_osd_status(args.cluster, args.osd_id):
+        raise Error('osd.%s is not activate' % args.osd_id)
+
+    # GET the mounted device and mount point.
+    mount_info = convert_osd_id(args.cluster, args.osd_id)
+
+    # remove 'ready', 'active', and INIT-specific files.
+    _remove_osd_directory_files(mount_info[1], args.cluster)
+
+    # Remove filesystem gpt partition type
+    _change_gpt_partition_type(mount_info[0], LINUX_RESERVED_TYPE)
+
+    # Check journal
+    # if journal is exist, remove the gpt partition type
+    journal_path = os.path.join(mount_info[1], 'journal')
+    if os.path.exists(journal_path) and os.path.islink(journal_path):
+        _change_gpt_partition_type(os.path.realpath(journal_path), LINUX_RESERVED_TYPE)
+    else:
+        LOG.info('Journal is not exist on osd.%s (or not symlink).', args.osd_id)
+
+    # Write deactivate to osd directory!
+    with file(os.path.join(mount_info[1], 'deactive'), 'w'):
+        path_set_context(os.path.join(mount_info[1], 'deactive'))
+        pass
+
+    # umount and remove mount point
+    unmount(mount_info[1])
+    LOG.info("Unmount and remove mountpoint `%s` successfully.", mount_info[1])
+
+    return
 
 ###########################
 
@@ -3252,6 +3536,7 @@ def parse_args(argv):
     make_activate_all_parser(subparsers)
     make_list_parser(subparsers)
     make_suppress_parser(subparsers)
+    make_deactivate_parser(subparsers)
     make_zap_parser(subparsers)
     make_trigger_parser(subparsers)
 
@@ -3502,6 +3787,22 @@ def make_suppress_parser(subparsers):
         func=main_unsuppress,
         )
     return suppress_parser
+
+def make_deactivate_parser(subparsers):
+    deactivate_parser = subparsers.add_parser('deactivate', help='Deactivate a Ceph OSD')
+    deactivate_parser.add_argument(
+        '--cluster',
+        metavar='NAME',
+        help='cluster name to assign this disk to',
+        )
+    deactivate_parser.add_argument(
+        '--osd-id',
+        metavar='OSDID',
+        help='ID of OSD to deactivate'
+        )
+    deactivate_parser.set_defaults(
+        func=main_deactivate,
+        )
 
 def make_zap_parser(subparsers):
     zap_parser = subparsers.add_parser('zap', help='Zap/erase/destroy a device\'s partition table (and contents)')
