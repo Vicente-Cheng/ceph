@@ -10217,9 +10217,11 @@ bool Client::_vxattrcb_quota_exists(Inode *in)
 size_t Client::_vxattrcb_quota(Inode *in, char *val, size_t size)
 {
   return snprintf(val, size,
-                  "max_bytes=%lld max_files=%lld",
+                  "max_bytes=%lld max_files=%lld usage: %lld/%lld (bytes)",
                   (long long int)in->quota.max_bytes,
-                  (long long int)in->quota.max_files);
+                  (long long int)in->quota.max_files,
+                  (unsigned long long)in->rstat.rbytes,
+                  (long long int)in->quota.max_bytes);
 }
 size_t Client::_vxattrcb_quota_max_bytes(Inode *in, char *val, size_t size)
 {
@@ -10228,6 +10230,12 @@ size_t Client::_vxattrcb_quota_max_bytes(Inode *in, char *val, size_t size)
 size_t Client::_vxattrcb_quota_max_files(Inode *in, char *val, size_t size)
 {
   return snprintf(val, size, "%lld", (long long int)in->quota.max_files);
+}
+size_t Client::_vxattrcb_quota_usage(Inode *in, char *val, size_t size)
+{
+  return snprintf(val, size, "%lld/%lld (bytes)",
+                  (unsigned long long)in->rstat.rbytes,
+                  (long long int)in->quota.max_bytes);
 }
 
 bool Client::_vxattrcb_layout_exists(Inode *in)
@@ -10335,6 +10343,14 @@ size_t Client::_vxattrcb_dir_rctime(Inode *in, char *val, size_t size)
   hidden: true,							\
   exists_cb: &Client::_vxattrcb_layout_exists,			\
 }
+#define XATTR_QUOTA_NAME(_type, _name)				\
+{								\
+  name: CEPH_XATTR_NAME(_type, name),				\
+  getxattr_cb: &Client::_vxattrcb_ ## _type ##_ ## _name,	\
+  readonly: true,						\
+  hidden: false,						\
+  exists_cb: NULL,						\
+}
 #define XATTR_QUOTA_FIELD(_type, _name)		                \
 {								\
   name: CEPH_XATTR_NAME(_type, _name),			        \
@@ -10374,6 +10390,7 @@ const Client::VXattr Client::_dir_vxattrs[] = {
   },
   XATTR_QUOTA_FIELD(quota, max_bytes),
   XATTR_QUOTA_FIELD(quota, max_files),
+  XATTR_QUOTA_NAME(quota, usage),
   { name: "" }     /* Required table terminator */
 };
 

@@ -861,6 +861,7 @@ private:
   size_t _vxattrcb_quota(Inode *in, char *val, size_t size);
   size_t _vxattrcb_quota_max_bytes(Inode *in, char *val, size_t size);
   size_t _vxattrcb_quota_max_files(Inode *in, char *val, size_t size);
+  size_t _vxattrcb_quota_usage(Inode *in, char *val, size_t size);
 
   bool _vxattrcb_layout_exists(Inode *in);
   size_t _vxattrcb_layout(Inode *in, char *val, size_t size);
