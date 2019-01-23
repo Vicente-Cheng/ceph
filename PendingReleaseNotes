@@ -182,3 +182,10 @@
   'ceph osd set pglog_hardlimit' after completely upgrading to 12.2.11. Once all the OSDs
   have this flag set, the length of the pg log will be capped by a hard limit. We do not
   recommend unsetting this flag beyond this point.
+
+>=12.2.11
+-------
+
+* The `cache drop` admin socket command has been removed. The `ceph tell mds.X
+  cache drop` remains.
+
