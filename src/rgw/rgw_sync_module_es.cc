@@ -109,8 +109,9 @@ public:
 
 #define ES_NUM_SHARDS_DEFAULT 16
 #define ES_NUM_REPLICAS_DEFAULT 1
+#define ES_VERSION_DEFAULT 0
 
-using ESVersion = std::pair<int,int>;
+static constexpr ESVersion ES_VNONE{0,0};
 static constexpr ESVersion ES_V5{5,0};
 
 struct ESInfo {
@@ -118,6 +119,8 @@ struct ESInfo {
   std::string cluster_name;
   std::string cluster_uuid;
   ESVersion version;
+
+  void set_version(ESVersion _version) { version = std::move(_version); }
 
   void decode_json(JSONObj *obj);
 
@@ -170,6 +173,7 @@ struct ElasticConfig {
   ItemList allow_owners;
   uint32_t num_shards{0};
   uint32_t num_replicas{0};
+  ESVersion esversion;
   std::map <string,string> default_headers = {{ "Content-Type", "application/json" }};
 
   void init(CephContext *cct, const JSONFormattable& config) {
@@ -185,6 +189,7 @@ struct ElasticConfig {
       num_shards = ES_NUM_SHARDS_MIN;
     }
     num_replicas = config["num_replicas"](ES_NUM_REPLICAS_DEFAULT);
+    esversion = rgw_conf_get_esversion(config, "version", ES_VERSION_DEFAULT);
     if (string user = config["username"], pw = config["password"];
         !user.empty() && !pw.empty()) {
       auto auth_string = user + ":" + pw;
@@ -206,6 +211,11 @@ struct ElasticConfig {
 
     index_path = "/rgw-" + realm.get_name() + buf;
   }
+
+  ESVersion get_esversion() {
+    return std::make_pair(esversion.first, esversion.second);
+  }
+
 
   string get_index_path() {
     return index_path;
@@ -658,15 +668,19 @@ public:
                                                     conf(_conf) {}
   int operate() override {
     reenter(this) {
-      ldout(sync_env->cct, 0) << ": init elasticsearch config zone=" << sync_env->source_zone << dendl;
-      yield call(new RGWReadRESTResourceCR<ESInfo> (sync_env->cct,
-                                                    conf->conn.get(),
-                                                    sync_env->http_manager,
-                                                    "/", nullptr /*params*/,
-                                                    &(conf->default_headers),
-                                                    &es_info));
-      if (retcode < 0) {
-        return set_cr_error(retcode);
+      if (conf->get_esversion() > ES_VNONE) {  // means manually config version, skip read es info.
+        es_info.set_version(conf->get_esversion());
+      } else {
+        ldout(sync_env->cct, 0) << ": init elasticsearch config zone=" << sync_env->source_zone << dendl;
+        yield call(new RGWReadRESTResourceCR<ESInfo> (sync_env->cct,
+                                                      conf->conn.get(),
+                                                      sync_env->http_manager,
+                                                      "/", nullptr /*params*/,
+                                                      &(conf->default_headers),
+                                                      &es_info));
+        if (retcode < 0) {
+          return set_cr_error(retcode);
+        }
       }
 
       yield {

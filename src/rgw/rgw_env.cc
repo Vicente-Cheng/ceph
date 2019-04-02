@@ -70,6 +70,23 @@ int RGWEnv::get_int(const char *name, int def_val) const
   return rgw_conf_get_int(env_map, name, def_val);
 }
 
+ESVersion rgw_conf_get_esversion(const map<string, string, ltstr_nocase>& conf_map, const char *name, int def_val)
+{
+  auto iter = conf_map.find(name);
+  if (iter == conf_map.end())
+    return std::make_pair(def_val, 0);
+
+  string val = iter->second;
+
+  // consider version format maybe 5.2, 6.1
+  string val_maj = val.substr(0, val.find("."));
+  string val_min = val.substr(1, val.find("."));
+  const char *s_maj = val_maj.c_str();
+  const char *s_min = val_min.c_str();
+
+  return std::make_pair(atoi(s_maj), atoi(s_min));
+}
+
 bool rgw_conf_get_bool(const map<string, string, ltstr_nocase>& conf_map, const char *name, bool def_val)
 {
   auto iter = conf_map.find(name);

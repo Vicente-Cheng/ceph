@@ -243,6 +243,8 @@ using ceph::crypto::MD5;
 #define UINT32_MAX (0xffffffffu)
 #endif
 
+using ESVersion = std::pair<int,int>;
+
 struct req_state;
 
 typedef void *RGWAccessHandle;
@@ -362,6 +364,7 @@ class RGWHTTPArgs {
 
 const char *rgw_conf_get(const map<string, string, ltstr_nocase>& conf_map, const char *name, const char *def_val);
 int rgw_conf_get_int(const map<string, string, ltstr_nocase>& conf_map, const char *name, int def_val);
+ESVersion rgw_conf_get_esversion(const map<string, string, ltstr_nocase>& conf_map, const char *name, int def_val);
 bool rgw_conf_get_bool(const map<string, string, ltstr_nocase>& conf_map, const char *name, bool def_val);
 
 class RGWEnv;
